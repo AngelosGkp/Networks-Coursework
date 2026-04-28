@@ -2,15 +2,18 @@
 // Coursework 2024/2025
 //
 // Submission by
-//  YOUR_NAME_GOES_HERE
+//  Angelos Gkoupidenis
 //  YOUR_STUDENT_ID_NUMBER_GOES_HERE
-//  YOUR_EMAIL_GOES_HERE
+//  angelos.gkoupidenis@city.ac.uk
 
 
 // DO NOT EDIT starts
 // This gives the interface that your code must implement.
 // These descriptions are intended to help you understand how the interface
 // will be used. See the RFC for how the protocol works.
+
+import java.net.*;
+import java.nio.charset.StandardCharsets;
 
 interface NodeInterface {
 
@@ -81,17 +84,52 @@ interface NodeInterface {
 
 // Complete this!
 public class Node implements NodeInterface {
+    private String nodeName;
+    private DatagramSocket socket;
 
     public void setNodeName(String nodeName) throws Exception {
-	throw new Exception("Not implemented");
+        this.nodeName = nodeName;
     }
 
     public void openPort(int portNumber) throws Exception {
-	throw new Exception("Not implemented");
+        this.socket = new DatagramSocket(portNumber);
+    }
+
+    public byte[] getHash() throws Exception {
+        return HashID.getHash(this.nodeName); //this is a helper method for the get hash call local test needs
     }
 
     public void handleIncomingMessages(int delay) throws Exception {
-	throw new Exception("Not implemented");
+        try {
+            if (delay > 0) { //setting timeout
+                socket.setSoTimeout(delay);
+            } else {
+                socket.setSoTimeout(0);
+            }
+
+            byte[] buffer = new byte[1024];
+            DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+            socket.receive(packet);
+            String message = new String(packet.getData(), 0, packet.getLength(), StandardCharsets.UTF_8);
+            String[] parts = message.split(" ");
+
+            if (parts.length < 2) return;
+
+            String type = parts[0];
+            String txid = parts[1];
+
+            if (type.equals("G")) {
+                //test response
+                String response = "H " + txid + " 0 " + nodeName + " ";  //if name request (G), respond with H <txid> <name>
+                byte[] responseBytes = response.getBytes(StandardCharsets.UTF_8);
+                DatagramPacket reply = new DatagramPacket(
+                        responseBytes, responseBytes.length,
+                        packet.getAddress(), packet.getPort()
+                );
+                socket.send(reply);
+            }
+        } catch (SocketTimeoutException e) {
+        }
     }
     
     public boolean isActive(String nodeName) throws Exception {
