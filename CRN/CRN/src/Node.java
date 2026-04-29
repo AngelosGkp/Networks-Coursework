@@ -116,6 +116,26 @@ public class Node implements NodeInterface {
         return HashID.getHash(this.nodeName); //this is a helper method for the get hash call local test needs
     }
 
+    public void handleIncomingMessages(int delay) throws Exception {
+        long deadline = (delay > 0) ? System.currentTimeMillis() + delay : Long.MAX_VALUE;
+
+        while (System.currentTimeMillis() < deadline) {
+            long remaining = deadline - System.currentTimeMillis();
+            if (delay > 0) {
+                socket.setSoTimeout((int) Math.max(remaining, 1));
+            } else {
+                socket.setSoTimeout(1000);
+            }
+            try {
+                byte[] buffer = new byte[65535];
+                DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+                socket.receive(packet);
+                processMessage(packet);
+            } catch (SocketTimeoutException e) {
+            }
+        }
+    }
+
     private void processMessage(DatagramPacket packet) {
         try {
             String raw = new String(packet.getData(), 0, packet.getLength(), StandardCharsets.UTF_8);
