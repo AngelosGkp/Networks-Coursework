@@ -93,7 +93,20 @@ public class Node implements NodeInterface {
     private Map<String, String> dataStore = new HashMap<>();
     private Deque<String> relayStack = new ArrayDeque<>();
     private Map<String, long[]> pendingRequests = new HashMap<>();
+    private Map<String, String> responseMap = new HashMap<>();
     private final Random random = new Random();
+
+    private void handleNearestRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
+    private void handleNearestResponse(String txid, String rest) {}
+    private void handleExistRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
+    private void handleExistResponse(String txid, String rest) {}
+    private void handleReadRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
+    private void handleReadResponse(String txid, String rest) {}
+    private void handleWriteRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
+    private void handleWriteResponse(String txid, String rest) {}
+    private void handleCASRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
+    private void handleCASResponse(String txid, String rest) {}
+    private void handleRelay(DatagramPacket packet, String txid, String rest) throws Exception {}
 
     private byte[] generateTextID() {
         byte[] txid = new byte[2];
@@ -101,6 +114,29 @@ public class Node implements NodeInterface {
             random.nextBytes(txid);
         } while (txid[0] == 0x20 || txid[1] == 0x20); // no spaces allowed
         return txid;
+    }
+
+    private String decodeString(String raw) {
+        try {
+            int firstSpace = raw.indexOf(' ');
+            if (firstSpace < 0) return "";
+            int numSpaces = Integer.parseInt(raw.substring(0, firstSpace));
+            String rest = raw.substring(firstSpace + 1);
+            int spacesFound = 0;
+            int i = 0;
+            while (i < rest.length()) {
+                if (rest.charAt(i) == ' ') {
+                    if (spacesFound == numSpaces) {
+                        return rest.substring(0, i);
+                    }
+                    spacesFound++;
+                }
+                i++;
+            }
+            return rest;
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     public void setNodeName(String nodeName) throws Exception {
@@ -183,18 +219,44 @@ public class Node implements NodeInterface {
         socket.send(reply);
     }
 
-    private void handleNameResponse(String txid, String rest) {}
-    private void handleNearestRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
-    private void handleNearestResponse(String txid, String rest) {}
-    private void handleExistRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
-    private void handleExistResponse(String txid, String rest) {}
-    private void handleReadRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
-    private void handleReadResponse(String txid, String rest) {}
-    private void handleWriteRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
-    private void handleWriteResponse(String txid, String rest) {}
-    private void handleCASRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
-    private void handleCASResponse(String txid, String rest) {}
-    private void handleRelay(DatagramPacket packet, String txid, String rest) throws Exception {}
+    private void handleNameResponse(String txid, String rest) {
+        if (responseMap.containsKey(txid)) {
+            responseMap.put(txid, rest.isEmpty() ? "" : rest);
+        }
+    }
+
+    private String sendAndWait(InetAddress address, int port, byte[] txid, String message) throws Exception {
+        String txKey = new String(txid, StandardCharsets.ISO_8859_1);
+        responseMap.put(txKey, null);
+
+        byte[] msgBytes = message.getBytes(StandardCharsets.UTF_8);
+
+        for (int attempt = 0; attempt < 3; attempt++) {
+            DatagramPacket packet = new DatagramPacket(msgBytes, msgBytes.length, address, port);
+            socket.send(packet);
+
+            long deadline = System.currentTimeMillis() + 5000;
+            while (System.currentTimeMillis() < deadline) {
+                long remaining = deadline - System.currentTimeMillis();
+                socket.setSoTimeout((int) Math.max(remaining, 1));
+                try {
+                    byte[] buffer = new byte[65535];
+                    DatagramPacket incoming = new DatagramPacket(buffer, buffer.length);
+                    socket.receive(incoming);
+                    processMessage(incoming);
+
+                    if (responseMap.containsKey(txKey) && responseMap.get(txKey) != null) {
+                        return responseMap.remove(txKey);
+                    }
+                } catch (SocketTimeoutException e) {
+                    // timed out - retry
+                }
+            }
+        }
+
+        responseMap.remove(txKey);
+        return null;
+    }
 
     private String encodeString(String s) { //helper method for strict formatting handling
         if (s == null) s = "";
@@ -221,11 +283,26 @@ public class Node implements NodeInterface {
         }
         return new String[]{sb.toString(), String.valueOf(pos)};
     }
-    
+
     public boolean isActive(String nodeName) throws Exception {
-	throw new Exception("Not implemented");
+        String address = addressStore.get(nodeName);
+        if (address == null) return false;
+
+        String[] parts = address.split(":");
+        if (parts.length != 2) return false;
+
+        InetAddress addr = InetAddress.getByName(parts[0]);
+        int port = Integer.parseInt(parts[1]);
+
+        byte[] txid = generateTextID();
+        String message = new String(txid, StandardCharsets.ISO_8859_1) + " G ";
+        String response = sendAndWait(addr, port, txid, message);
+        if (response == null) return false;
+
+        String receivedName = decodeString(response);
+        return nodeName.equals(receivedName);
     }
-    
+
     public void pushRelay(String nodeName) throws Exception {
 	throw new Exception("Not implemented");
     }
@@ -237,7 +314,7 @@ public class Node implements NodeInterface {
     public boolean exists(String key) throws Exception {
 	throw new Exception("Not implemented");
     }
-    
+
     public String read(String key) throws Exception {
 	throw new Exception("Not implemented");
     }
