@@ -14,6 +14,7 @@
 
 import java.net.*;
 import java.nio.charset.StandardCharsets;
+import java.util.*;
 
 interface NodeInterface {
 
@@ -85,10 +86,26 @@ interface NodeInterface {
 // Complete this!
 public class Node implements NodeInterface {
     private String nodeName;
+    private byte[] nodeHashID;
     private DatagramSocket socket;
+
+    private Map<String, String> addressStore = new HashMap<>();
+    private Map<String, String> dataStore = new HashMap<>();
+    private Deque<String> relayStack = new ArrayDeque<>();
+    private Map<String, long[]> pendingRequests = new HashMap<>();
+    private final Random random = new Random();
+
+    private byte[] generateTextID() {
+        byte[] txid = new byte[2];
+        do {
+            random.nextBytes(txid);
+        } while (txid[0] == 0x20 || txid[1] == 0x20); // no spaces allowed
+        return txid;
+    }
 
     public void setNodeName(String nodeName) throws Exception {
         this.nodeName = nodeName;
+        this.nodeHashID = HashID.getHash(nodeName);
     }
 
     public void openPort(int portNumber) throws Exception {
@@ -99,37 +116,90 @@ public class Node implements NodeInterface {
         return HashID.getHash(this.nodeName); //this is a helper method for the get hash call local test needs
     }
 
-    public void handleIncomingMessages(int delay) throws Exception {
+    private void processMessage(DatagramPacket packet) {
         try {
-            if (delay > 0) { //setting timeout
-                socket.setSoTimeout(delay);
-            } else {
-                socket.setSoTimeout(0);
+            String raw = new String(packet.getData(), 0, packet.getLength(), StandardCharsets.UTF_8);
+
+            //used for message format: <2-byte txid> <space> <type>...
+            if (raw.length() < 4) return;
+
+            String txid = raw.substring(0, 2);
+
+            if (raw.charAt(2) != ' ') return;
+
+            char type = raw.charAt(3);
+
+            String rest = raw.length() > 5 ? raw.substring(5) : "";
+
+            switch (type) {
+                case 'G': handleNameRequest(packet, txid); break;
+                case 'H': handleNameResponse(txid, rest); break;
+                case 'N': handleNearestRequest(packet, txid, rest); break;
+                case 'O': handleNearestResponse(txid, rest); break;
+                case 'E': handleExistRequest(packet, txid, rest); break;
+                case 'F': handleExistResponse(txid, rest); break;
+                case 'R': handleReadRequest(packet, txid, rest); break;
+                case 'S': handleReadResponse(txid, rest); break;
+                case 'W': handleWriteRequest(packet, txid, rest); break;
+                case 'X': handleWriteResponse(txid, rest); break;
+                case 'C': handleCASRequest(packet, txid, rest); break;
+                case 'D': handleCASResponse(txid, rest); break;
+                case 'V': handleRelay(packet, txid, rest); break;
+                case 'I': break; // Information messages - discard
+                default:  break; // Unknown type - discard safely
             }
 
-            byte[] buffer = new byte[1024];
-            DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
-            socket.receive(packet);
-            String message = new String(packet.getData(), 0, packet.getLength(), StandardCharsets.UTF_8);
-            String[] parts = message.split(" ");
-
-            if (parts.length < 2) return;
-
-            String type = parts[0];
-            String txid = parts[1];
-
-            if (type.equals("G")) {
-                //test response
-                String response = "H " + txid + " 0 " + nodeName + " ";  //if name request (G), respond with H <txid> <name>
-                byte[] responseBytes = response.getBytes(StandardCharsets.UTF_8);
-                DatagramPacket reply = new DatagramPacket(
-                        responseBytes, responseBytes.length,
-                        packet.getAddress(), packet.getPort()
-                );
-                socket.send(reply);
-            }
-        } catch (SocketTimeoutException e) {
+        } catch (Exception e) {
         }
+    }
+
+    private void handleNameRequest(DatagramPacket packet, String txid) throws Exception {
+        String response = txid + " H " + encodeString(nodeName);
+        byte[] responseBytes = response.getBytes(StandardCharsets.UTF_8);
+        DatagramPacket reply = new DatagramPacket(
+                responseBytes, responseBytes.length,
+                packet.getAddress(), packet.getPort()
+        );
+        socket.send(reply);
+    }
+
+    private void handleNameResponse(String txid, String rest) {}
+    private void handleNearestRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
+    private void handleNearestResponse(String txid, String rest) {}
+    private void handleExistRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
+    private void handleExistResponse(String txid, String rest) {}
+    private void handleReadRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
+    private void handleReadResponse(String txid, String rest) {}
+    private void handleWriteRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
+    private void handleWriteResponse(String txid, String rest) {}
+    private void handleCASRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
+    private void handleCASResponse(String txid, String rest) {}
+    private void handleRelay(DatagramPacket packet, String txid, String rest) throws Exception {}
+
+    private String encodeString(String s) { //helper method for strict formatting handling
+        if (s == null) s = "";
+        int spaceCount = 0;
+        for (char c : s.toCharArray()) {
+            if (c == ' ') spaceCount++;
+        }
+        return spaceCount + " " + s + " ";
+    }
+
+    //temporary, since ill need to implement working with the raw string directly rather than splitting it
+    private String[] decodeString(String[] parts, int pos) { //parses a crn-encoded string starting at position 'pos'
+                                                             //returns in the format {decoded string, next index}
+        int numSpaces = Integer.parseInt(parts[pos]);
+        pos++;
+        StringBuilder sb = new StringBuilder();
+        int spacesFound = 0;
+        while (spacesFound < numSpaces || (sb.length() == 0 && numSpaces == 0)) {
+            if (sb.length() > 0) sb.append(" ");
+            sb.append(parts[pos]);
+            spacesFound += (parts[pos].equals("") ? 0 : 0); //count spaces in token
+            pos++;
+            if (spacesFound >= numSpaces) break;
+        }
+        return new String[]{sb.toString(), String.valueOf(pos)};
     }
     
     public boolean isActive(String nodeName) throws Exception {
