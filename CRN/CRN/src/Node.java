@@ -98,10 +98,6 @@ public class Node implements NodeInterface {
 
     private void handleExistRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
     private void handleExistResponse(String txid, String rest) {}
-    private void handleReadRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
-    private void handleReadResponse(String txid, String rest) {}
-    private void handleWriteRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
-    private void handleWriteResponse(String txid, String rest) {}
     private void handleCASRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
     private void handleCASResponse(String txid, String rest) {}
     private void handleRelay(DatagramPacket packet, String txid, String rest) throws Exception {}
@@ -393,6 +389,89 @@ public class Node implements NodeInterface {
         } catch (Exception e) {}
     }
 
+    private boolean isOneOfClosest(byte[] targetHash) throws Exception {
+        int ourDistance = HashID.getDistance(nodeHashID, targetHash);
+        int strictlyCloser = 0;
+        for (String name : addressStore.keySet()) {
+            if (name.equals(this.nodeName)) continue;
+            byte[] h = HashID.getHash(name);
+            int d = HashID.getDistance(h, targetHash);
+            if (d > ourDistance) strictlyCloser++;
+            if (strictlyCloser >= 3) return false;
+        }
+        return true;
+    }
+
+    private void handleWriteRequest(DatagramPacket packet, String txid, String rest) throws Exception {
+        Object[] keyResult = decodeString(rest, 0);
+        if (keyResult == null) return;
+        String key = (String) keyResult[0];
+        int offset = (int) keyResult[1];
+
+        Object[] valResult = decodeString(rest, offset);
+        if (valResult == null) return;
+        String value = (String) valResult[0];
+
+        byte[] targetHash = HashID.getHash(key);
+        boolean hasKey = dataStore.containsKey(key) || addressStore.containsKey(key);
+        boolean isClosest = isOneOfClosest(targetHash);
+
+        String code;
+        if (hasKey) {
+            code = "R";
+            if (key.startsWith("N:")) addressStore.put(key, value);
+            else dataStore.put(key, value);
+        } else if (isClosest) {
+            code = "A";
+            if (key.startsWith("N:")) learnAddress(key, value);
+            else dataStore.put(key, value);
+        } else {
+            code = "X";
+        } //replace - add - reject
+
+        String response = txid + " X " + code + " ";
+        byte[] responseBytes = response.getBytes(StandardCharsets.UTF_8);
+        socket.send(new DatagramPacket(responseBytes, responseBytes.length,
+                packet.getAddress(), packet.getPort()));
+    }
+
+    private void handleWriteResponse(String txid, String rest) {
+        if (responseMap.containsKey(txid)) {
+            responseMap.put(txid, rest.trim());
+        }
+    }
+
+    private void handleReadRequest(DatagramPacket packet, String txid, String rest) throws Exception {
+        Object[] keyResult = decodeString(rest, 0);
+        if (keyResult == null) return;
+        String key = (String) keyResult[0];
+
+        byte[] targetHash = HashID.getHash(key);
+        String storedValue = dataStore.containsKey(key) ? dataStore.get(key)
+                : addressStore.containsKey(key) ? addressStore.get(key)
+                  : null;
+        boolean isClosest = isOneOfClosest(targetHash);
+
+        String response;
+        if (storedValue != null) {
+            response = txid + " S Y " + encodeString(storedValue);
+        } else if (isClosest) {
+            response = txid + " S N ";
+        } else {
+            response = txid + " S ? ";
+        }
+
+        byte[] responseBytes = response.getBytes(StandardCharsets.UTF_8);
+        socket.send(new DatagramPacket(responseBytes, responseBytes.length,
+                packet.getAddress(), packet.getPort()));
+    }
+
+    private void handleReadResponse(String txid, String rest) {
+        if (responseMap.containsKey(txid)) {
+            responseMap.put(txid, rest.trim());
+        }
+    }
+
     public void pushRelay(String nodeName) throws Exception {
 	throw new Exception("Not implemented");
     }
@@ -406,11 +485,69 @@ public class Node implements NodeInterface {
     }
 
     public String read(String key) throws Exception {
-	throw new Exception("Not implemented");
+        if (dataStore.containsKey(key)) return dataStore.get(key);
+        if (addressStore.containsKey(key)) return addressStore.get(key);
+
+        byte[] targetHash = HashID.getHash(key);
+        List<Map.Entry<String, String>> closest = getClosestNodes(targetHash, 3);
+
+        for (Map.Entry<String, String> entry : closest) {
+            String addr = entry.getValue();
+            if (addr == null || addr.isEmpty()) continue;
+            String[] parts = addr.split(":");
+            if (parts.length != 2) continue;
+
+            InetAddress address = InetAddress.getByName(parts[0]);
+            int port = Integer.parseInt(parts[1]);
+
+            byte[] txid = generateTextID();
+            String message = new String(txid, StandardCharsets.ISO_8859_1)
+                    + " R " + encodeString(key);
+
+            String response = sendAndWait(address, port, txid, message);
+            if (response == null) continue;
+
+            if (response.startsWith("Y ")) {
+                return decodeString(response.substring(2));
+            } else if (response.startsWith("N")) {
+                return null;
+            }
+            //implementing a "not-close enough" method, ? meaning that this node isn't close enough
+        }
+        return null;
     }
 
     public boolean write(String key, String value) throws Exception {
-	throw new Exception("Not implemented");
+        byte[] targetHash = HashID.getHash(key);
+
+        //check if we should store ourselves first
+        if (isOneOfClosest(targetHash)) {
+            if (key.startsWith("N:")) learnAddress(key, value);
+            else dataStore.put(key, value);
+            return true;
+        }
+
+        //send to closest known nodes
+        List<Map.Entry<String, String>> closest = getClosestNodes(targetHash, 3);
+        for (Map.Entry<String, String> entry : closest) {
+            String addr = entry.getValue();
+            if (addr == null || addr.isEmpty()) continue;
+            String[] parts = addr.split(":");
+            if (parts.length != 2) continue;
+
+            InetAddress address = InetAddress.getByName(parts[0]);
+            int port = Integer.parseInt(parts[1]);
+
+            byte[] txid = generateTextID();
+            String message = new String(txid, StandardCharsets.ISO_8859_1)
+                    + " W " + encodeString(key) + encodeString(value);
+
+            String response = sendAndWait(address, port, txid, message);
+            if (response != null && (response.startsWith("A") || response.startsWith("R"))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public boolean CAS(String key, String currentValue, String newValue) throws Exception {
