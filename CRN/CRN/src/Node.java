@@ -96,8 +96,6 @@ public class Node implements NodeInterface {
     private Map<String, String> responseMap = new HashMap<>();
     private final Random random = new Random();
 
-    private void handleNearestRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
-    private void handleNearestResponse(String txid, String rest) {}
     private void handleExistRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
     private void handleExistResponse(String txid, String rest) {}
     private void handleReadRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
@@ -142,6 +140,7 @@ public class Node implements NodeInterface {
     public void setNodeName(String nodeName) throws Exception {
         this.nodeName = nodeName;
         this.nodeHashID = HashID.getHash(nodeName);
+        addressStore.put(nodeName, ""); //updated when open port is called
     }
 
     public void openPort(int portNumber) throws Exception {
@@ -267,21 +266,27 @@ public class Node implements NodeInterface {
         return spaceCount + " " + s + " ";
     }
 
-    //temporary, since ill need to implement working with the raw string directly rather than splitting it
-    private String[] decodeString(String[] parts, int pos) { //parses a crn-encoded string starting at position 'pos'
-                                                             //returns in the format {decoded string, next index}
-        int numSpaces = Integer.parseInt(parts[pos]);
-        pos++;
-        StringBuilder sb = new StringBuilder();
-        int spacesFound = 0;
-        while (spacesFound < numSpaces || (sb.length() == 0 && numSpaces == 0)) {
-            if (sb.length() > 0) sb.append(" ");
-            sb.append(parts[pos]);
-            spacesFound += (parts[pos].equals("") ? 0 : 0); //count spaces in token
-            pos++;
-            if (spacesFound >= numSpaces) break;
+    private Object[] decodeString(String raw, int offset) {
+        try {
+            int spaceIdx = raw.indexOf(' ', offset);
+            if (spaceIdx < 0) return null;
+            int numSpaces = Integer.parseInt(raw.substring(offset, spaceIdx));
+            int pos = spaceIdx + 1;
+            int spacesFound = 0;
+            while (pos < raw.length()) {
+                if (raw.charAt(pos) == ' ') {
+                    if (spacesFound == numSpaces) {
+                        String decoded = raw.substring(spaceIdx + 1, pos);
+                        return new Object[]{decoded, pos + 1};
+                    }
+                    spacesFound++;
+                }
+                pos++;
+            }
+            return null;
+        } catch (Exception e) {
+            return null;
         }
-        return new String[]{sb.toString(), String.valueOf(pos)};
     }
 
     public boolean isActive(String nodeName) throws Exception {
@@ -301,6 +306,91 @@ public class Node implements NodeInterface {
 
         String receivedName = decodeString(response);
         return nodeName.equals(receivedName);
+    }
+
+    private byte[] hexToBytes(String hex) {
+        byte[] bytes = new byte[hex.length() / 2];
+        for (int i = 0; i < bytes.length; i++) {
+            bytes[i] = (byte) Integer.parseInt(hex.substring(i * 2, i * 2 + 2), 16);
+        }
+        return bytes;
+    }
+
+    private void learnAddress(String name, String address) throws Exception {
+        if (name.equals(this.nodeName)) return;
+        if (addressStore.containsKey(name)) {
+            addressStore.put(name, address);
+            return;
+        }
+        byte[] targetHash = HashID.getHash(name);
+        int dist = 256 - HashID.getDistance(nodeHashID, targetHash);
+        int count = 0;
+        for (String n : addressStore.keySet()) {
+            if (n.equals(this.nodeName)) continue;
+            byte[] h = HashID.getHash(n);
+            int d = 256 - HashID.getDistance(nodeHashID, h);
+            if (d == dist) count++;
+        }
+        if (count < 3) {
+            addressStore.put(name, address);
+        }
+    }
+
+    private List<Map.Entry<String, String>> getClosestNodes(byte[] targetHash, int count) throws Exception {
+        List<Map.Entry<String, String>> all = new ArrayList<>(addressStore.entrySet());
+        all.sort((a, b) -> {
+            try {
+                byte[] hashA = HashID.getHash(a.getKey());
+                byte[] hashB = HashID.getHash(b.getKey());
+                int bitsA = HashID.getDistance(targetHash, hashA);
+                int bitsB = HashID.getDistance(targetHash, hashB);
+                return Integer.compare(bitsB, bitsA); // more matching bits = closer
+            } catch (Exception e) { return 0; }
+        });
+        return all.subList(0, Math.min(count, all.size()));
+    }
+
+    private void handleNearestRequest(DatagramPacket packet, String txid, String rest) throws Exception {
+        String targetHashHex = rest.trim();
+        if (targetHashHex.length() != 64) return;
+        byte[] targetHash = hexToBytes(targetHashHex);
+
+        List<Map.Entry<String, String>> closest = getClosestNodes(targetHash, 3);
+
+        StringBuilder response = new StringBuilder();
+        response.append(txid).append(" O ");
+        for (Map.Entry<String, String> entry : closest) {
+            response.append(encodeString(entry.getKey()));
+            response.append(encodeString(entry.getValue()));
+        }
+
+        byte[] responseBytes = response.toString().getBytes(StandardCharsets.UTF_8);
+        socket.send(new DatagramPacket(responseBytes, responseBytes.length,
+                packet.getAddress(), packet.getPort()));
+    }
+
+    private void handleNearestResponse(String txid, String rest) {
+        if (responseMap.containsKey(txid)) {
+            responseMap.put(txid, rest);
+        }
+        try {
+            int offset = 0;
+            while (offset < rest.length()) {
+                Object[] keyResult = decodeString(rest, offset);
+                if (keyResult == null) break;
+                String key = (String) keyResult[0];
+                offset = (int) keyResult[1];
+
+                Object[] valResult = decodeString(rest, offset);
+                if (valResult == null) break;
+                String val = (String) valResult[0];
+                offset = (int) valResult[1];
+
+                if (key.startsWith("N:") && val.contains(":")) {
+                    learnAddress(key, val);
+                }
+            }
+        } catch (Exception e) {}
     }
 
     public void pushRelay(String nodeName) throws Exception {
