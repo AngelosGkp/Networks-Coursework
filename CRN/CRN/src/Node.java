@@ -90,6 +90,7 @@ public class Node implements NodeInterface {
     private byte[] nodeHashID;
     private DatagramSocket socket;
     private Map<String, String> seenNodes = new HashMap<>();
+    private boolean broadExplored = false; //avoid random exploration for every single key
 
     private Map<String, String> addressStore   = new HashMap<>();
     private Map<String, String> dataStore      = new HashMap<>();
@@ -512,6 +513,17 @@ public class Node implements NodeInterface {
         if (addressStore.containsKey(key)) return addressStore.get(key);
 
         byte[] targetHash = HashID.getHash(key);
+
+        if (!broadExplored) {
+            broadExplored = true;
+            Random r = new Random();
+            for (int i = 0; i < 5; i++) {
+                byte[] randomHash = new byte[32];
+                r.nextBytes(randomHash);
+                findClosestNodes(randomHash);
+            }
+        }
+
         findClosestNodes(targetHash);
 
         List<Map.Entry<String, String>> allKnown = getClosestNodes(targetHash, addressStore.size());
@@ -531,7 +543,6 @@ public class Node implements NodeInterface {
                 if (response == null) continue;
                 if (response.startsWith("Y "))
                     return decodeStringRaw(response.substring(2));
-                // N or ? - keep trying other nodes
             } catch (Exception e) {}
         }
         return null;
