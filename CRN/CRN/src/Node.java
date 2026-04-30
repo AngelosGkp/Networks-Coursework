@@ -89,7 +89,6 @@ public class Node implements NodeInterface {
     private String nodeName;
     private byte[] nodeHashID;
     private DatagramSocket socket;
-    private boolean networkExplored = false;
 
     private Map<String, String> addressStore  = new HashMap<>();
     private Map<String, String> dataStore     = new HashMap<>();
@@ -299,7 +298,6 @@ public class Node implements NodeInterface {
 
 
     public void handleIncomingMessages(int delay) throws Exception {
-        if (delay > 0) networkExplored = false;
         long deadline = (delay > 0) ? System.currentTimeMillis() + delay : Long.MAX_VALUE;
         while (System.currentTimeMillis() < deadline) {
             long remaining = deadline - System.currentTimeMillis();
@@ -427,19 +425,6 @@ public class Node implements NodeInterface {
         socket.send(new DatagramPacket(out, out.length, packet.getAddress(), packet.getPort()));
     }
 
-    private void exploreNetwork() throws Exception {
-        if (networkExplored) return;
-        networkExplored = true;
-
-        findClosestNodes(nodeHashID);
-
-        Random r = new Random();
-        for (int i = 0; i < 3; i++) {
-            byte[] randomHash = new byte[32];
-            r.nextBytes(randomHash);
-            findClosestNodes(randomHash);
-        }
-    }
 
     private void handleReadResponse(String txid, String rest) {
         if (responseMap.containsKey(txid)) responseMap.put(txid, rest.trim());
@@ -519,8 +504,6 @@ public class Node implements NodeInterface {
 
         byte[] targetHash = HashID.getHash(key);
 
-        //explore network once, then targeted search for this key
-        exploreNetwork();
         findClosestNodes(targetHash);
 
         List<Map.Entry<String, String>> allKnown = getClosestNodes(targetHash, addressStore.size());
