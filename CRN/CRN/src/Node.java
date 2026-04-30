@@ -89,14 +89,13 @@ public class Node implements NodeInterface {
     private String nodeName;
     private byte[] nodeHashID;
     private DatagramSocket socket;
-    private Map<String, String> seenNodes = new HashMap<>();
-    private boolean broadExplored = false; //avoid random exploration for every single key
+    private final Random random = new Random();
 
+    private Map<String, String> seenNodes = new HashMap<>();
     private Map<String, String> addressStore   = new HashMap<>();
     private Map<String, String> dataStore      = new HashMap<>();
     private Map<String, String> responseMap    = new HashMap<>();
     private Deque<String>       relayStack     = new ArrayDeque<>();
-    private final Random random = new Random();
 
     public void setNodeName(String nodeName) throws Exception {
         this.nodeName   = nodeName;
@@ -339,6 +338,9 @@ public class Node implements NodeInterface {
                 processMessage(packet);
             } catch (SocketTimeoutException e) {}
         }
+        if (delay > 0) {
+            findClosestNodes(nodeHashID);
+        }
     }
 
     private void processMessage(DatagramPacket packet) {
@@ -513,17 +515,6 @@ public class Node implements NodeInterface {
         if (addressStore.containsKey(key)) return addressStore.get(key);
 
         byte[] targetHash = HashID.getHash(key);
-
-        if (!broadExplored) {
-            broadExplored = true;
-            Random r = new Random();
-            for (int i = 0; i < 5; i++) {
-                byte[] randomHash = new byte[32];
-                r.nextBytes(randomHash);
-                findClosestNodes(randomHash);
-            }
-        }
-
         findClosestNodes(targetHash);
 
         List<Map.Entry<String, String>> allKnown = getClosestNodes(targetHash, addressStore.size());
