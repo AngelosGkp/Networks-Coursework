@@ -424,8 +424,57 @@ public class Node implements NodeInterface {
         } catch (Exception e) {}
     }
 
-    private void handleExistRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
-    private void handleExistResponse(String txid, String rest) {}
+    private void handleExistRequest(DatagramPacket packet, String txid, String rest) throws Exception {
+        Object[] kr = decodeNextString(rest, 0);
+        if (kr == null) return;
+        String key = (String) kr[0];
+
+        byte[] targetHash = HashID.getHash(key);
+        boolean hasKey = dataStore.containsKey(key) || addressStore.containsKey(key);
+        boolean isClosest = isOneOfClosest(targetHash);
+
+        String code;
+        if (hasKey)          code = "Y";
+        else if (isClosest)  code = "N";
+        else                 code = "?";
+
+        String response = txid + " F " + code + " ";
+        byte[] out = response.getBytes(StandardCharsets.UTF_8);
+        socket.send(new DatagramPacket(out, out.length, packet.getAddress(), packet.getPort()));
+    }
+
+    private void handleExistResponse(String txid, String rest) {
+        if (responseMap.containsKey(txid)) responseMap.put(txid, rest.trim());
+    }
+
+    public boolean exists(String key) throws Exception {
+        if (dataStore.containsKey(key))    return true;
+        if (addressStore.containsKey(key)) return true;
+
+        byte[] targetHash = HashID.getHash(key);
+        findClosestNodes(targetHash);
+
+        List<Map.Entry<String, String>> allKnown = getClosestNodes(targetHash, addressStore.size());
+        for (Map.Entry<String, String> entry : allKnown) {
+            String addr = entry.getValue();
+            if (addr == null || addr.isEmpty()) continue;
+            if (entry.getKey().equals(this.nodeName)) continue;
+            String[] parts = addr.split(":");
+            if (parts.length != 2) continue;
+            try {
+                InetAddress address = InetAddress.getByName(parts[0]);
+                int port = Integer.parseInt(parts[1]);
+                byte[] txid = generateTxID();
+                String message = new String(txid, StandardCharsets.ISO_8859_1)
+                        + " E " + encodeString(key);
+                String response = sendAndWait(address, port, txid, message);
+                if (response == null) continue;
+                if (response.trim().equals("Y")) return true;
+                if (response.trim().equals("N")) return false;
+            } catch (Exception e) {}
+        }
+        return false;
+    }
 
     private void handleReadRequest(DatagramPacket packet, String txid, String rest) throws Exception {
         Object[] kr = decodeNextString(rest, 0);
@@ -508,7 +557,6 @@ public class Node implements NodeInterface {
 
     public void pushRelay(String nodeName) throws Exception { relayStack.push(nodeName); }
     public void popRelay() throws Exception { if (!relayStack.isEmpty()) relayStack.pop(); }
-    public boolean exists(String key) throws Exception { return false; }
 
     public void preExplore() throws Exception {
         //explore from our own position first
