@@ -89,6 +89,7 @@ public class Node implements NodeInterface {
     private String nodeName;
     private byte[] nodeHashID;
     private DatagramSocket socket;
+    private Map<String, String> seenNodes = new HashMap<>();
 
     private Map<String, String> addressStore   = new HashMap<>();
     private Map<String, String> dataStore      = new HashMap<>();
@@ -173,6 +174,7 @@ public class Node implements NodeInterface {
 
     private void learnAddress(String name, String address) throws Exception {
         if (name.equals(this.nodeName)) return;
+        seenNodes.put(name, address); //always remember for exploration
         if (addressStore.containsKey(name)) {
             addressStore.put(name, address);
             return;
@@ -283,27 +285,42 @@ public class Node implements NodeInterface {
 
     private void findClosestNodes(byte[] targetHash) throws Exception {
         Set<String> queried = new HashSet<>();
-        boolean improved = true;
+        boolean foundNew = true;
         int maxRounds = 10;
 
-        while (improved && maxRounds-- > 0) {
-            improved = false;
-            List<Map.Entry<String, String>> candidates = getClosestNodes(targetHash, 10);
-            for (Map.Entry<String, String> entry : candidates) {
+        Map<String, String> allCandidates = new HashMap<>(seenNodes);
+        allCandidates.putAll(addressStore);
+
+        while (foundNew && maxRounds-- > 0) {
+            foundNew = false;
+            List<Map.Entry<String, String>> sorted = new ArrayList<>(allCandidates.entrySet());
+            sorted.sort((a, b) -> {
+                try {
+                    int bitsA = HashID.getDistance(targetHash, HashID.getHash(a.getKey()));
+                    int bitsB = HashID.getDistance(targetHash, HashID.getHash(b.getKey()));
+                    return Integer.compare(bitsB, bitsA);
+                } catch (Exception e) { return 0; }
+            });
+
+            for (Map.Entry<String, String> entry : sorted.subList(0, Math.min(10, sorted.size()))) {
                 String name = entry.getKey();
                 String addr = entry.getValue();
                 if (queried.contains(name)) continue;
                 if (addr == null || addr.isEmpty()) continue;
                 if (name.equals(this.nodeName)) continue;
                 queried.add(name);
+                foundNew = true;
                 String[] parts = addr.split(":");
                 if (parts.length != 2) continue;
                 try {
                     InetAddress address = InetAddress.getByName(parts[0]);
                     int port = Integer.parseInt(parts[1]);
-                    int sizeBefore = addressStore.size();
+                    // Add any newly discovered nodes to allCandidates
+                    int before = seenNodes.size();
                     sendNearestRequest(address, port, targetHash);
-                    if (addressStore.size() > sizeBefore) improved = true;
+                    if (seenNodes.size() > before) {
+                        allCandidates.putAll(seenNodes);
+                    }
                 } catch (Exception e) {}
             }
         }
