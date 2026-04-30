@@ -141,6 +141,8 @@ public class Node implements NodeInterface {
 
     public void openPort(int portNumber) throws Exception {
         this.socket = new DatagramSocket(portNumber);
+        String ownAddress = InetAddress.getLocalHost().getHostAddress() + ":" + portNumber;
+        addressStore.put(nodeName, ownAddress); //storing our own address so we can advertise it
     }
 
     public byte[] getHash() throws Exception {
@@ -487,10 +489,12 @@ public class Node implements NodeInterface {
     public String read(String key) throws Exception {
         if (dataStore.containsKey(key)) return dataStore.get(key);
         if (addressStore.containsKey(key)) return addressStore.get(key);
-
         byte[] targetHash = HashID.getHash(key);
-        List<Map.Entry<String, String>> closest = getClosestNodes(targetHash, 3);
 
+        //explore the network first
+        findClosestNodes(targetHash);
+
+        List<Map.Entry<String, String>> closest = getClosestNodes(targetHash, 3);
         for (Map.Entry<String, String> entry : closest) {
             String addr = entry.getValue();
             if (addr == null || addr.isEmpty()) continue;
@@ -520,15 +524,19 @@ public class Node implements NodeInterface {
     public boolean write(String key, String value) throws Exception {
         byte[] targetHash = HashID.getHash(key);
 
-        //check if we should store ourselves first
+        //explore the network first
+        findClosestNodes(targetHash);
+
+        //check if we should store it ourselves
         if (isOneOfClosest(targetHash)) {
             if (key.startsWith("N:")) learnAddress(key, value);
             else dataStore.put(key, value);
             return true;
         }
 
-        //send to closest known nodes
+        //send to the 3 closest nodes
         List<Map.Entry<String, String>> closest = getClosestNodes(targetHash, 3);
+        boolean anySuccess = false;
         for (Map.Entry<String, String> entry : closest) {
             String addr = entry.getValue();
             if (addr == null || addr.isEmpty()) continue;
@@ -544,10 +552,71 @@ public class Node implements NodeInterface {
 
             String response = sendAndWait(address, port, txid, message);
             if (response != null && (response.startsWith("A") || response.startsWith("R"))) {
-                return true;
+                anySuccess = true;
             }
         }
-        return false;
+        return anySuccess;
+    }
+
+    private void sendNearestRequest(InetAddress address, int port, byte[] targetHash) throws Exception {
+        byte[] txid = generateTextID();
+        String hashHex = HashID.bytesToHex(targetHash);
+        String message = new String(txid, StandardCharsets.ISO_8859_1) + " N " + hashHex + " ";
+        String response = sendAndWait(address, port, txid, message);
+        if (response != null) {
+            int offset = 0;
+            while (offset < response.length()) {
+                Object[] keyResult = decodeString(response, offset);
+                if (keyResult == null) break;
+                String key = (String) keyResult[0];
+                offset = (int) keyResult[1];
+
+                Object[] valResult = decodeString(response, offset);
+                if (valResult == null) break;
+                String val = (String) valResult[0];
+                offset = (int) valResult[1];
+
+                if (key.startsWith("N:") && val.contains(":")) {
+                    learnAddress(key, val);
+                }
+            }
+        }
+    }
+
+    private void findClosestNodes(byte[] targetHash) throws Exception {
+        Set<String> queried = new HashSet<>();
+        boolean improved = true;
+
+        while (improved) {
+            improved = false;
+            List<Map.Entry<String, String>> candidates = getClosestNodes(targetHash, 3);
+
+            for (Map.Entry<String, String> entry : candidates) {
+                String name = entry.getKey();
+                String addr = entry.getValue();
+
+                if (queried.contains(name)) continue;
+                if (addr == null || addr.isEmpty()) continue;
+                if (name.equals(this.nodeName)) continue;
+
+                queried.add(name);
+
+                String[] parts = addr.split(":");
+                if (parts.length != 2) continue;
+
+                try {
+                    InetAddress address = InetAddress.getByName(parts[0]);
+                    int port = Integer.parseInt(parts[1]);
+
+                    int sizeBefore = addressStore.size();
+                    sendNearestRequest(address, port, targetHash);
+                    int sizeAfter = addressStore.size();
+
+                    if (sizeAfter > sizeBefore) improved = true;
+                } catch (Exception e) { //if node is unreachable, skip
+                }
+            }
+        }
     }
 
     public boolean CAS(String key, String currentValue, String newValue) throws Exception {
