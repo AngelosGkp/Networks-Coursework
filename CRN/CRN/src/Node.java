@@ -216,8 +216,12 @@ public class Node implements NodeInterface {
         return true;
     }
 
-    // Full reliability: 3 retries x 5 seconds
     private String sendAndWait(InetAddress address, int port, byte[] txid, String message) throws Exception {
+        // If relay stack is not empty, wrap message in relay
+        if (!relayStack.isEmpty()) {
+            return sendViaRelay(address, port, txid, message);
+        }
+
         String txKey = new String(txid, StandardCharsets.ISO_8859_1);
         responseMap.put(txKey, null);
         byte[] msgBytes = message.getBytes(StandardCharsets.UTF_8);
@@ -241,7 +245,71 @@ public class Node implements NodeInterface {
         return null;
     }
 
-    // Fast: 1 attempt x 2 seconds, for exploration only
+    private String sendViaRelay(InetAddress address, int port, byte[] txid, String message) throws Exception {
+        //building the relay chain from bottom to top
+        List<String> relays = new ArrayList<>(relayStack);
+        Collections.reverse(relays);
+
+        String wrappedMessage = message;
+
+        //wrapping the message for each relay in reverse
+        byte[] outerTxid = generateTxID();
+        String outerTxidStr = new String(outerTxid, StandardCharsets.ISO_8859_1);
+
+        //wrapping the message for the final target node
+        String targetNodeName = null;
+        for (Map.Entry<String, String> e : addressStore.entrySet()) {
+            if (e.getValue().equals(address.getHostAddress() + ":" + port)) {
+                targetNodeName = e.getKey();
+                break;
+            }
+        }
+        if (targetNodeName == null) return null;
+
+        String currentMessage = wrappedMessage;
+        String currentTarget = targetNodeName;
+
+        for (int i = relays.size() - 1; i >= 0; i--) {
+            String relayNode = relays.get(i);
+            byte[] relayTxid = generateTxID();
+            String relayTxidStr = new String(relayTxid, StandardCharsets.ISO_8859_1);
+            currentMessage = relayTxidStr + " V " + encodeString(currentTarget) + currentMessage;
+            currentTarget = relayNode;
+        }
+
+        //send to first relay node
+        String firstRelay = relays.get(0);
+        String firstRelayAddr = addressStore.get(firstRelay);
+        if (firstRelayAddr == null) return null;
+        String[] parts = firstRelayAddr.split(":");
+        if (parts.length != 2) return null;
+
+        InetAddress relayAddress = InetAddress.getByName(parts[0]);
+        int relayPort = Integer.parseInt(parts[1]);
+
+        String txKey = new String(txid, StandardCharsets.ISO_8859_1);
+        responseMap.put(txKey, null);
+        byte[] msgBytes = currentMessage.getBytes(StandardCharsets.UTF_8);
+
+        for (int attempt = 0; attempt < 3; attempt++) {
+            socket.send(new DatagramPacket(msgBytes, msgBytes.length, relayAddress, relayPort));
+            long deadline = System.currentTimeMillis() + 5000;
+            while (System.currentTimeMillis() < deadline) {
+                socket.setSoTimeout((int) Math.max(deadline - System.currentTimeMillis(), 1));
+                try {
+                    byte[] buffer = new byte[65535];
+                    DatagramPacket incoming = new DatagramPacket(buffer, buffer.length);
+                    socket.receive(incoming);
+                    processMessage(incoming);
+                    if (responseMap.containsKey(txKey) && responseMap.get(txKey) != null)
+                        return responseMap.remove(txKey);
+                } catch (SocketTimeoutException e) {}
+            }
+        }
+        responseMap.remove(txKey);
+        return null;
+    }
+
     private String sendAndWaitFast(InetAddress address, int port, byte[] txid, String message) throws Exception {
         String txKey = new String(txid, StandardCharsets.ISO_8859_1);
         responseMap.put(txKey, null);
@@ -315,7 +383,6 @@ public class Node implements NodeInterface {
                 try {
                     InetAddress address = InetAddress.getByName(parts[0]);
                     int port = Integer.parseInt(parts[1]);
-                    // Add any newly discovered nodes to allCandidates
                     int before = seenNodes.size();
                     sendNearestRequest(address, port, targetHash);
                     if (seenNodes.size() > before) {
@@ -537,9 +604,94 @@ public class Node implements NodeInterface {
         if (responseMap.containsKey(txid)) responseMap.put(txid, rest.trim());
     }
 
-    private void handleCASRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
-    private void handleCASResponse(String txid, String rest) {}
-    private void handleRelay(DatagramPacket packet, String txid, String rest) throws Exception {}
+    private void handleRelay(DatagramPacket packet, String txid, String rest) throws Exception {
+        Object[] kr = decodeNextString(rest, 0);
+        if (kr == null)
+            return;
+
+        String targetNodeName = (String) kr[0];
+        int offset = (int) kr[1];
+
+        String embeddedMessage = rest.substring(offset);
+        if (embeddedMessage.isEmpty())
+            return;
+
+        String targetAddress = addressStore.get(targetNodeName);
+        if (targetAddress == null)
+            targetAddress = seenNodes.get(targetNodeName);
+        if (targetAddress == null || targetAddress.isEmpty())
+            return;
+
+        String[] parts = targetAddress.split(":");
+        if (parts.length != 2)
+            return;
+
+        InetAddress targetAddr = InetAddress.getByName(parts[0]);
+        int targetPort = Integer.parseInt(parts[1]);
+
+        //save original sender info and relay txid
+        InetAddress originalSender = packet.getAddress();
+        int originalPort = packet.getPort();
+        String relayTxid = txid;
+
+        //extract the embedded message's txid
+        String embeddedTxid = embeddedMessage.substring(0, 2);
+
+        //generate a NEW txid for the forwarded message
+        byte[] newTxid = generateTxID();
+        String newTxidStr = new String(newTxid, StandardCharsets.ISO_8859_1);
+
+        //replace the embedded message's txid with the new one
+        String forwardedMessage = newTxidStr + embeddedMessage.substring(2);
+
+        Thread relayThread = new Thread(() -> {
+            try {
+                responseMap.put(newTxidStr, null);
+
+                //forward the message to the target node
+                byte[] forwardBytes = forwardedMessage.getBytes(StandardCharsets.UTF_8);
+                socket.send(new DatagramPacket(forwardBytes, forwardBytes.length,
+                        targetAddr, targetPort));
+
+                String response = null;
+                for (int attempt = 0; attempt < 3 && response == null; attempt++) {
+                    if (attempt > 0) {
+                        socket.send(new DatagramPacket(forwardBytes, forwardBytes.length,
+                                targetAddr, targetPort));
+                    }
+                    long deadline = System.currentTimeMillis() + 5000;
+                    while (System.currentTimeMillis() < deadline) {
+                        socket.setSoTimeout((int) Math.max(deadline - System.currentTimeMillis(), 1));
+                        try {
+                            byte[] buffer = new byte[65535];
+                            DatagramPacket incoming = new DatagramPacket(buffer, buffer.length);
+                            socket.receive(incoming);
+                            processMessage(incoming);
+                            if (responseMap.containsKey(newTxidStr)
+                                    && responseMap.get(newTxidStr) != null) {
+                                response = responseMap.remove(newTxidStr);
+                                break;
+                            }
+                        } catch (SocketTimeoutException e) {}
+                    }
+                }
+
+                if (response == null) {
+                    responseMap.remove(newTxidStr);
+                    return;
+                }
+
+                //in order to properly send the response back, I use the RELAY txid, not the embedded one
+                String finalResponse = relayTxid + " " + response.substring(2);
+                byte[] finalBytes = finalResponse.getBytes(StandardCharsets.UTF_8);
+                socket.send(new DatagramPacket(finalBytes, finalBytes.length,
+                        originalSender, originalPort));
+
+            } catch (Exception e) {}
+        });
+        relayThread.setDaemon(true);
+        relayThread.start();
+    }
 
     public boolean isActive(String nodeName) throws Exception {
         String address = addressStore.get(nodeName);
@@ -651,7 +803,85 @@ public class Node implements NodeInterface {
         return anySuccess;
     }
 
+    private void handleCASRequest(DatagramPacket packet, String txid, String rest) throws Exception {
+        Object[] kr = decodeNextString(rest, 0);
+        if (kr == null) return;
+        String key = (String) kr[0]; int offset = (int) kr[1];
+
+        Object[] vr1 = decodeNextString(rest, offset);
+        if (vr1 == null) return;
+        String currentValue = (String) vr1[0]; offset = (int) vr1[1];
+
+        Object[] vr2 = decodeNextString(rest, offset);
+        if (vr2 == null) return;
+        String newValue = (String) vr2[0];
+
+        byte[] targetHash = HashID.getHash(key);
+        boolean hasKey = dataStore.containsKey(key) ||
+                (key.startsWith("N:") && addressStore.containsKey(key));
+        boolean isClosest = isOneOfClosest(targetHash);
+
+        String code;
+        if (hasKey) {
+            String stored = dataStore.containsKey(key) ? dataStore.get(key)
+                    : addressStore.get(key);
+            if (stored.equals(currentValue)) {
+                code = "R";
+                if (key.startsWith("N:")) addressStore.put(key, newValue);
+                else dataStore.put(key, newValue);
+            } else {
+                code = "N";
+            }
+        } else if (isClosest) {
+            code = "A";
+            if (key.startsWith("N:")) learnAddress(key, newValue);
+            else dataStore.put(key, newValue);
+        } else {
+            code = "X";
+        }
+
+        String response = txid + " D " + code + " ";
+        byte[] out = response.getBytes(StandardCharsets.UTF_8);
+        socket.send(new DatagramPacket(out, out.length, packet.getAddress(), packet.getPort()));
+    }
+
+    private void handleCASResponse(String txid, String rest) {
+        if (responseMap.containsKey(txid)) responseMap.put(txid, rest.trim());
+    }
+
     public boolean CAS(String key, String currentValue, String newValue) throws Exception {
+        byte[] targetHash = HashID.getHash(key);
+        findClosestNodes(targetHash);
+
+        if (dataStore.containsKey(key)) {
+            if (dataStore.get(key).equals(currentValue)) {
+                dataStore.put(key, newValue);
+                return true;
+            }
+            return false;
+        }
+
+        List<Map.Entry<String, String>> closest = getClosestNodes(targetHash, 3);
+        for (Map.Entry<String, String> entry : closest) {
+            String addr = entry.getValue();
+            if (addr == null || addr.isEmpty()) continue;
+            if (entry.getKey().equals(this.nodeName)) continue;
+            String[] parts = addr.split(":");
+            if (parts.length != 2) continue;
+
+            InetAddress address = InetAddress.getByName(parts[0]);
+            int port = Integer.parseInt(parts[1]);
+            byte[] txid = generateTxID();
+            String message = new String(txid, StandardCharsets.ISO_8859_1)
+                    + " C " + encodeString(key)
+                    + encodeString(currentValue)
+                    + encodeString(newValue);
+
+            String response = sendAndWait(address, port, txid, message);
+            if (response == null) continue;
+            if (response.trim().equals("R") || response.trim().equals("A")) return true;
+            if (response.trim().equals("N")) return false;
+        }
         return false;
     }
 }
