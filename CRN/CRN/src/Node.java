@@ -90,35 +90,32 @@ public class Node implements NodeInterface {
     private byte[] nodeHashID;
     private DatagramSocket socket;
 
-    private Map<String, String> addressStore  = new HashMap<>();
-    private Map<String, String> dataStore     = new HashMap<>();
-    private Map<String, String> responseMap   = new HashMap<>();
-    private Map<String, long[]> pendingRequests = new HashMap<>();
-    private Deque<String>       relayStack    = new ArrayDeque<>();
+    private Map<String, String> addressStore   = new HashMap<>();
+    private Map<String, String> dataStore      = new HashMap<>();
+    private Map<String, String> responseMap    = new HashMap<>();
+    private Deque<String>       relayStack     = new ArrayDeque<>();
     private final Random random = new Random();
 
     public void setNodeName(String nodeName) throws Exception {
         this.nodeName   = nodeName;
         this.nodeHashID = HashID.getHash(nodeName);
-        addressStore.put(nodeName, ""); //placeholder until open port, updated when open port is called
+        addressStore.put(nodeName, "");
     }
 
     public void openPort(int portNumber) throws Exception {
         this.socket = new DatagramSocket(portNumber);
         String ownAddress = InetAddress.getLocalHost().getHostAddress() + ":" + portNumber;
-        addressStore.put(nodeName, ownAddress); //storing our own addresss so we can advertise it
+        addressStore.put(nodeName, ownAddress);
     }
 
-    //for localtest compatibility
     public byte[] getHash() throws Exception {
         return HashID.getHash(this.nodeName);
     }
 
     private byte[] generateTxID() {
         byte[] txid = new byte[2];
-        do {
-            random.nextBytes(txid);
-        } while (txid[0] == 0x20 || txid[1] == 0x20); //ensuring no spaces are allowed
+        do { random.nextBytes(txid); }
+        while (txid[0] == 0x20 || txid[1] == 0x20);
         return txid;
     }
 
@@ -129,7 +126,6 @@ public class Node implements NodeInterface {
         return spaceCount + " " + s + " ";
     }
 
-    //decoding a CRN string starting at offset in raw
     private Object[] decodeNextString(String raw, int offset) {
         try {
             int spaceIdx = raw.indexOf(' ', offset);
@@ -151,7 +147,6 @@ public class Node implements NodeInterface {
         } catch (Exception e) { return null; }
     }
 
-    //decoding a standalone CRN encoded string for single value responses
     private String decodeStringRaw(String raw) {
         try {
             int firstSpace = raw.indexOf(' ');
@@ -176,9 +171,6 @@ public class Node implements NodeInterface {
         return bytes;
     }
 
-    // -------------------------------------------------------------------------
-    // Address store helpers
-    // -------------------------------------------------------------------------
     private void learnAddress(String name, String address) throws Exception {
         if (name.equals(this.nodeName)) return;
         if (addressStore.containsKey(name)) {
@@ -203,7 +195,7 @@ public class Node implements NodeInterface {
             try {
                 int bitsA = HashID.getDistance(targetHash, HashID.getHash(a.getKey()));
                 int bitsB = HashID.getDistance(targetHash, HashID.getHash(b.getKey()));
-                return Integer.compare(bitsB, bitsA); //more matching bits means it is closer
+                return Integer.compare(bitsB, bitsA);
             } catch (Exception e) { return 0; }
         });
         return all.subList(0, Math.min(count, all.size()));
@@ -222,6 +214,54 @@ public class Node implements NodeInterface {
         return true;
     }
 
+    // Full reliability: 3 retries x 5 seconds
+    private String sendAndWait(InetAddress address, int port, byte[] txid, String message) throws Exception {
+        String txKey = new String(txid, StandardCharsets.ISO_8859_1);
+        responseMap.put(txKey, null);
+        byte[] msgBytes = message.getBytes(StandardCharsets.UTF_8);
+
+        for (int attempt = 0; attempt < 3; attempt++) {
+            socket.send(new DatagramPacket(msgBytes, msgBytes.length, address, port));
+            long deadline = System.currentTimeMillis() + 5000;
+            while (System.currentTimeMillis() < deadline) {
+                socket.setSoTimeout((int) Math.max(deadline - System.currentTimeMillis(), 1));
+                try {
+                    byte[] buffer = new byte[65535];
+                    DatagramPacket incoming = new DatagramPacket(buffer, buffer.length);
+                    socket.receive(incoming);
+                    processMessage(incoming);
+                    if (responseMap.containsKey(txKey) && responseMap.get(txKey) != null)
+                        return responseMap.remove(txKey);
+                } catch (SocketTimeoutException e) {}
+            }
+        }
+        responseMap.remove(txKey);
+        return null;
+    }
+
+    // Fast: 1 attempt x 2 seconds, for exploration only
+    private String sendAndWaitFast(InetAddress address, int port, byte[] txid, String message) throws Exception {
+        String txKey = new String(txid, StandardCharsets.ISO_8859_1);
+        responseMap.put(txKey, null);
+        byte[] msgBytes = message.getBytes(StandardCharsets.UTF_8);
+
+        socket.send(new DatagramPacket(msgBytes, msgBytes.length, address, port));
+        long deadline = System.currentTimeMillis() + 2000;
+        while (System.currentTimeMillis() < deadline) {
+            socket.setSoTimeout((int) Math.max(deadline - System.currentTimeMillis(), 1));
+            try {
+                byte[] buffer = new byte[65535];
+                DatagramPacket incoming = new DatagramPacket(buffer, buffer.length);
+                socket.receive(incoming);
+                processMessage(incoming);
+                if (responseMap.containsKey(txKey) && responseMap.get(txKey) != null)
+                    return responseMap.remove(txKey);
+            } catch (SocketTimeoutException e) {}
+        }
+        responseMap.remove(txKey);
+        return null;
+    }
+
     private void sendNearestRequest(InetAddress address, int port, byte[] targetHash) throws Exception {
         byte[] txid = generateTxID();
         String hashHex = HashID.bytesToHex(targetHash);
@@ -230,12 +270,12 @@ public class Node implements NodeInterface {
         if (response != null) {
             int offset = 0;
             while (offset < response.length()) {
-                Object[] keyResult = decodeNextString(response, offset);
-                if (keyResult == null) break;
-                String key = (String) keyResult[0]; offset = (int) keyResult[1];
-                Object[] valResult = decodeNextString(response, offset);
-                if (valResult == null) break;
-                String val = (String) valResult[0]; offset = (int) valResult[1];
+                Object[] kr = decodeNextString(response, offset);
+                if (kr == null) break;
+                String key = (String) kr[0]; offset = (int) kr[1];
+                Object[] vr = decodeNextString(response, offset);
+                if (vr == null) break;
+                String val = (String) vr[0]; offset = (int) vr[1];
                 if (key.startsWith("N:") && val.contains(":")) learnAddress(key, val);
             }
         }
@@ -269,54 +309,6 @@ public class Node implements NodeInterface {
         }
     }
 
-    private String sendAndWait(InetAddress address, int port, byte[] txid, String message) throws Exception {
-        String txKey = new String(txid, StandardCharsets.ISO_8859_1);
-        responseMap.put(txKey, null);
-        byte[] msgBytes = message.getBytes(StandardCharsets.UTF_8);
-
-        for (int attempt = 0; attempt < 3; attempt++) {
-            socket.send(new DatagramPacket(msgBytes, msgBytes.length, address, port));
-            long deadline = System.currentTimeMillis() + 5000;
-            while (System.currentTimeMillis() < deadline) {
-                socket.setSoTimeout((int) Math.max(deadline - System.currentTimeMillis(), 1));
-                try {
-                    byte[] buffer = new byte[65535];
-                    DatagramPacket incoming = new DatagramPacket(buffer, buffer.length);
-                    socket.receive(incoming);
-                    processMessage(incoming);
-                    if (responseMap.containsKey(txKey) && responseMap.get(txKey) != null)
-                        return responseMap.remove(txKey);
-                } catch (SocketTimeoutException e) {}
-            }
-        }
-        responseMap.remove(txKey);
-        return null;
-    }
-
-    //fast version has 1 attempt every 2 seconds - for network exploration
-    private String sendAndWaitFast(InetAddress address, int port, byte[] txid, String message) throws Exception {
-        String txKey = new String(txid, StandardCharsets.ISO_8859_1);
-        responseMap.put(txKey, null);
-        byte[] msgBytes = message.getBytes(StandardCharsets.UTF_8);
-
-        socket.send(new DatagramPacket(msgBytes, msgBytes.length, address, port));
-        long deadline = System.currentTimeMillis() + 2000;
-        while (System.currentTimeMillis() < deadline) {
-            socket.setSoTimeout((int) Math.max(deadline - System.currentTimeMillis(), 1));
-            try {
-                byte[] buffer = new byte[65535];
-                DatagramPacket incoming = new DatagramPacket(buffer, buffer.length);
-                socket.receive(incoming);
-                processMessage(incoming);
-                if (responseMap.containsKey(txKey) && responseMap.get(txKey) != null)
-                    return responseMap.remove(txKey);
-            } catch (SocketTimeoutException e) {}
-        }
-        responseMap.remove(txKey);
-        return null;
-    }
-
-
     public void handleIncomingMessages(int delay) throws Exception {
         long deadline = (delay > 0) ? System.currentTimeMillis() + delay : Long.MAX_VALUE;
         while (System.currentTimeMillis() < deadline) {
@@ -327,15 +319,13 @@ public class Node implements NodeInterface {
                 DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
                 socket.receive(packet);
                 processMessage(packet);
-            } catch (SocketTimeoutException e) { /* normal */ }
+            } catch (SocketTimeoutException e) {}
         }
     }
 
     private void processMessage(DatagramPacket packet) {
         try {
             String raw = new String(packet.getData(), 0, packet.getLength(), StandardCharsets.UTF_8);
-
-            //dispatcher used for specific message format
             if (raw.length() < 4) return;
             String txid = raw.substring(0, 2);
             if (raw.charAt(2) != ' ') return;
@@ -356,27 +346,23 @@ public class Node implements NodeInterface {
                 case 'C': handleCASRequest(packet, txid, rest);     break;
                 case 'D': handleCASResponse(txid, rest);            break;
                 case 'V': handleRelay(packet, txid, rest);          break;
-                case 'I': break; // discard
-                default:  break; // unknown - discard safely
+                case 'I': break;
+                default:  break;
             }
-        } catch (Exception e) {
-        }
+        } catch (Exception e) {}
     }
 
     private void handleNameRequest(DatagramPacket packet, String txid) throws Exception {
         String response = txid + " H " + encodeString(nodeName);
-        socket.send(new DatagramPacket(
-                response.getBytes(StandardCharsets.UTF_8),
-                response.getBytes(StandardCharsets.UTF_8).length,
-                packet.getAddress(), packet.getPort()));
+        byte[] out = response.getBytes(StandardCharsets.UTF_8);
+        socket.send(new DatagramPacket(out, out.length, packet.getAddress(), packet.getPort()));
 
         try {
             byte[] myTxid = generateTxID();
             String msg = new String(myTxid, StandardCharsets.ISO_8859_1)
                     + " N " + HashID.bytesToHex(nodeHashID) + " ";
-            socket.send(new DatagramPacket(
-                    msg.getBytes(StandardCharsets.UTF_8),
-                    msg.getBytes(StandardCharsets.UTF_8).length,
+            byte[] msgOut = msg.getBytes(StandardCharsets.UTF_8);
+            socket.send(new DatagramPacket(msgOut, msgOut.length,
                     packet.getAddress(), packet.getPort()));
         } catch (Exception e) {}
     }
@@ -408,16 +394,12 @@ public class Node implements NodeInterface {
             int offset = 0;
             while (offset < rest.length()) {
                 Object[] kr = decodeNextString(rest, offset);
-
                 if (kr == null) break;
                 String key = (String) kr[0]; offset = (int) kr[1];
                 Object[] vr = decodeNextString(rest, offset);
-
                 if (vr == null) break;
                 String val = (String) vr[0]; offset = (int) vr[1];
-
-                if (key.startsWith("N:") && val.contains(":"))
-                    learnAddress(key, val); //learn all the node adresses as we see them
+                if (key.startsWith("N:") && val.contains(":")) learnAddress(key, val);
             }
         } catch (Exception e) {}
     }
@@ -437,14 +419,13 @@ public class Node implements NodeInterface {
         boolean isClosest = isOneOfClosest(targetHash);
 
         String response;
-        if (stored != null)       response = txid + " S Y " + encodeString(stored);
-        else if (isClosest)       response = txid + " S N ";
-        else                      response = txid + " S ? ";
+        if (stored != null)  response = txid + " S Y " + encodeString(stored);
+        else if (isClosest)  response = txid + " S N ";
+        else                 response = txid + " S ? ";
 
         byte[] out = response.getBytes(StandardCharsets.UTF_8);
         socket.send(new DatagramPacket(out, out.length, packet.getAddress(), packet.getPort()));
     }
-
 
     private void handleReadResponse(String txid, String rest) {
         if (responseMap.containsKey(txid)) responseMap.put(txid, rest.trim());
@@ -462,7 +443,7 @@ public class Node implements NodeInterface {
         if (key.startsWith("N:") && value.contains(":")) learnAddress(key, value);
 
         byte[] targetHash = HashID.getHash(key);
-        boolean hasKey   = dataStore.containsKey(key)
+        boolean hasKey    = dataStore.containsKey(key)
                 || (key.startsWith("N:") && addressStore.containsKey(key));
         boolean isClosest = isOneOfClosest(targetHash);
 
@@ -476,7 +457,7 @@ public class Node implements NodeInterface {
             if (!key.startsWith("N:")) dataStore.put(key, value);
         } else {
             code = "X";
-        } //replace - add - request
+        }
 
         String response = txid + " X " + code + " ";
         byte[] out = response.getBytes(StandardCharsets.UTF_8);
@@ -486,7 +467,6 @@ public class Node implements NodeInterface {
     private void handleWriteResponse(String txid, String rest) {
         if (responseMap.containsKey(txid)) responseMap.put(txid, rest.trim());
     }
-
 
     private void handleCASRequest(DatagramPacket packet, String txid, String rest) throws Exception {}
     private void handleCASResponse(String txid, String rest) {}
@@ -506,17 +486,9 @@ public class Node implements NodeInterface {
         return nodeName.equals(decodeStringRaw(response));
     }
 
-    public void pushRelay(String nodeName) throws Exception {
-        relayStack.push(nodeName);
-    }
-
-    public void popRelay() throws Exception {
-        if (!relayStack.isEmpty()) relayStack.pop();
-    }
-
-    public boolean exists(String key) throws Exception {
-        return false; // stub
-    }
+    public void pushRelay(String nodeName) throws Exception { relayStack.push(nodeName); }
+    public void popRelay() throws Exception { if (!relayStack.isEmpty()) relayStack.pop(); }
+    public boolean exists(String key) throws Exception { return false; }
 
     public String read(String key) throws Exception {
         if (dataStore.containsKey(key))    return dataStore.get(key);
@@ -526,8 +498,6 @@ public class Node implements NodeInterface {
         findClosestNodes(targetHash);
 
         List<Map.Entry<String, String>> allKnown = getClosestNodes(targetHash, addressStore.size());
-        boolean anyCloseNodeResponded = false;
-
         for (Map.Entry<String, String> entry : allKnown) {
             String addr = entry.getValue();
             if (addr == null || addr.isEmpty()) continue;
@@ -542,16 +512,12 @@ public class Node implements NodeInterface {
                         + " R " + encodeString(key);
                 String response = sendAndWait(address, port, txid, message);
                 if (response == null) continue;
-
-                if (response.startsWith("Y ")) {
-                    return decodeStringRaw(response.substring(2)); // found it!
-                } else if (response.startsWith("N")) {
-                    anyCloseNodeResponded = true;
-                }
+                if (response.startsWith("Y "))
+                    return decodeStringRaw(response.substring(2));
+                // N or ? - keep trying other nodes
             } catch (Exception e) {}
         }
-
-        return anyCloseNodeResponded ? null : null;
+        return null;
     }
 
     public boolean write(String key, String value) throws Exception {
