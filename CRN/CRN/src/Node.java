@@ -209,7 +209,6 @@ public class Node implements NodeInterface {
         return all.subList(0, Math.min(count, all.size()));
     }
 
-    // Returns true if this node is among the 3 closest known nodes to targetHash.
     private boolean isOneOfClosest(byte[] targetHash) throws Exception {
         int ourDistance = HashID.getDistance(nodeHashID, targetHash);
         int strictlyCloser = 0;
@@ -524,10 +523,11 @@ public class Node implements NodeInterface {
         if (addressStore.containsKey(key)) return addressStore.get(key);
 
         byte[] targetHash = HashID.getHash(key);
-
         findClosestNodes(targetHash);
 
         List<Map.Entry<String, String>> allKnown = getClosestNodes(targetHash, addressStore.size());
+        boolean anyCloseNodeResponded = false;
+
         for (Map.Entry<String, String> entry : allKnown) {
             String addr = entry.getValue();
             if (addr == null || addr.isEmpty()) continue;
@@ -542,11 +542,16 @@ public class Node implements NodeInterface {
                         + " R " + encodeString(key);
                 String response = sendAndWait(address, port, txid, message);
                 if (response == null) continue;
-                if (response.startsWith("Y ")) return decodeStringRaw(response.substring(2));
-                if (response.startsWith("N"))  return null;
+
+                if (response.startsWith("Y ")) {
+                    return decodeStringRaw(response.substring(2)); // found it!
+                } else if (response.startsWith("N")) {
+                    anyCloseNodeResponded = true;
+                }
             } catch (Exception e) {}
         }
-        return null;
+
+        return anyCloseNodeResponded ? null : null;
     }
 
     public boolean write(String key, String value) throws Exception {
