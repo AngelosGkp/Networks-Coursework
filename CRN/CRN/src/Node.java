@@ -227,20 +227,16 @@ public class Node implements NodeInterface {
         byte[] txid = generateTxID();
         String hashHex = HashID.bytesToHex(targetHash);
         String message = new String(txid, StandardCharsets.ISO_8859_1) + " N " + hashHex + " ";
-        String response = sendAndWait(address, port, txid, message);
+        String response = sendAndWaitFast(address, port, txid, message);
         if (response != null) {
             int offset = 0;
             while (offset < response.length()) {
                 Object[] keyResult = decodeNextString(response, offset);
                 if (keyResult == null) break;
-                String key = (String) keyResult[0];
-                offset = (int) keyResult[1];
-
+                String key = (String) keyResult[0]; offset = (int) keyResult[1];
                 Object[] valResult = decodeNextString(response, offset);
                 if (valResult == null) break;
-                String val = (String) valResult[0];
-                offset = (int) valResult[1];
-
+                String val = (String) valResult[0]; offset = (int) valResult[1];
                 if (key.startsWith("N:") && val.contains(":")) learnAddress(key, val);
             }
         }
@@ -279,8 +275,33 @@ public class Node implements NodeInterface {
         responseMap.put(txKey, null);
         byte[] msgBytes = message.getBytes(StandardCharsets.UTF_8);
 
+        for (int attempt = 0; attempt < 3; attempt++) {
+            socket.send(new DatagramPacket(msgBytes, msgBytes.length, address, port));
+            long deadline = System.currentTimeMillis() + 5000;
+            while (System.currentTimeMillis() < deadline) {
+                socket.setSoTimeout((int) Math.max(deadline - System.currentTimeMillis(), 1));
+                try {
+                    byte[] buffer = new byte[65535];
+                    DatagramPacket incoming = new DatagramPacket(buffer, buffer.length);
+                    socket.receive(incoming);
+                    processMessage(incoming);
+                    if (responseMap.containsKey(txKey) && responseMap.get(txKey) != null)
+                        return responseMap.remove(txKey);
+                } catch (SocketTimeoutException e) {}
+            }
+        }
+        responseMap.remove(txKey);
+        return null;
+    }
+
+    //fast version has 1 attempt every 2 seconds - for network exploration
+    private String sendAndWaitFast(InetAddress address, int port, byte[] txid, String message) throws Exception {
+        String txKey = new String(txid, StandardCharsets.ISO_8859_1);
+        responseMap.put(txKey, null);
+        byte[] msgBytes = message.getBytes(StandardCharsets.UTF_8);
+
         socket.send(new DatagramPacket(msgBytes, msgBytes.length, address, port));
-        long deadline = System.currentTimeMillis() + 2000; //2 seconds for exploration
+        long deadline = System.currentTimeMillis() + 2000;
         while (System.currentTimeMillis() < deadline) {
             socket.setSoTimeout((int) Math.max(deadline - System.currentTimeMillis(), 1));
             try {
