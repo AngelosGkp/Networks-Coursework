@@ -89,6 +89,7 @@ public class Node implements NodeInterface {
     private String nodeName;
     private byte[] nodeHashID;
     private DatagramSocket socket;
+    private boolean networkExplored = false;
 
     private Map<String, String> addressStore  = new HashMap<>();
     private Map<String, String> dataStore     = new HashMap<>();
@@ -223,9 +224,6 @@ public class Node implements NodeInterface {
         return true;
     }
 
-    // -------------------------------------------------------------------------
-    // Network exploration
-    // -------------------------------------------------------------------------
     private void sendNearestRequest(InetAddress address, int port, byte[] targetHash) throws Exception {
         byte[] txid = generateTxID();
         String hashHex = HashID.bytesToHex(targetHash);
@@ -277,38 +275,31 @@ public class Node implements NodeInterface {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // UDP send and wait (with retransmission)
-    // -------------------------------------------------------------------------
     private String sendAndWait(InetAddress address, int port, byte[] txid, String message) throws Exception {
         String txKey = new String(txid, StandardCharsets.ISO_8859_1);
         responseMap.put(txKey, null);
         byte[] msgBytes = message.getBytes(StandardCharsets.UTF_8);
 
-        for (int attempt = 0; attempt < 3; attempt++) {
-            socket.send(new DatagramPacket(msgBytes, msgBytes.length, address, port));
-
-            long deadline = System.currentTimeMillis() + 5000;
-            while (System.currentTimeMillis() < deadline) {
-                socket.setSoTimeout((int) Math.max(deadline - System.currentTimeMillis(), 1));
-                try {
-                    byte[] buffer = new byte[65535];
-                    DatagramPacket incoming = new DatagramPacket(buffer, buffer.length);
-                    socket.receive(incoming);
-                    processMessage(incoming);
-                    if (responseMap.containsKey(txKey) && responseMap.get(txKey) != null)
-                        return responseMap.remove(txKey);
-                } catch (SocketTimeoutException e) { /* retry */ }
-            }
+        socket.send(new DatagramPacket(msgBytes, msgBytes.length, address, port));
+        long deadline = System.currentTimeMillis() + 2000; //2 seconds for exploration
+        while (System.currentTimeMillis() < deadline) {
+            socket.setSoTimeout((int) Math.max(deadline - System.currentTimeMillis(), 1));
+            try {
+                byte[] buffer = new byte[65535];
+                DatagramPacket incoming = new DatagramPacket(buffer, buffer.length);
+                socket.receive(incoming);
+                processMessage(incoming);
+                if (responseMap.containsKey(txKey) && responseMap.get(txKey) != null)
+                    return responseMap.remove(txKey);
+            } catch (SocketTimeoutException e) {}
         }
         responseMap.remove(txKey);
         return null;
     }
 
-    // -------------------------------------------------------------------------
-    // Incoming message loop
-    // -------------------------------------------------------------------------
+
     public void handleIncomingMessages(int delay) throws Exception {
+        if (delay > 0) networkExplored = false;
         long deadline = (delay > 0) ? System.currentTimeMillis() + delay : Long.MAX_VALUE;
         while (System.currentTimeMillis() < deadline) {
             long remaining = deadline - System.currentTimeMillis();
@@ -436,6 +427,20 @@ public class Node implements NodeInterface {
         socket.send(new DatagramPacket(out, out.length, packet.getAddress(), packet.getPort()));
     }
 
+    private void exploreNetwork() throws Exception {
+        if (networkExplored) return;
+        networkExplored = true;
+
+        findClosestNodes(nodeHashID);
+
+        Random r = new Random();
+        for (int i = 0; i < 3; i++) {
+            byte[] randomHash = new byte[32];
+            r.nextBytes(randomHash);
+            findClosestNodes(randomHash);
+        }
+    }
+
     private void handleReadResponse(String txid, String rest) {
         if (responseMap.containsKey(txid)) responseMap.put(txid, rest.trim());
     }
@@ -509,18 +514,15 @@ public class Node implements NodeInterface {
     }
 
     public String read(String key) throws Exception {
-        if (dataStore.containsKey(key))   return dataStore.get(key);
+        if (dataStore.containsKey(key))    return dataStore.get(key);
         if (addressStore.containsKey(key)) return addressStore.get(key);
 
         byte[] targetHash = HashID.getHash(key);
 
-        //explore our own position first
-        findClosestNodes(nodeHashID);
-
-        //then explore toward the target key specifically
+        //explore network once, then targeted search for this key
+        exploreNetwork();
         findClosestNodes(targetHash);
 
-        //finally, ask all known nodes
         List<Map.Entry<String, String>> allKnown = getClosestNodes(targetHash, addressStore.size());
         for (Map.Entry<String, String> entry : allKnown) {
             String addr = entry.getValue();
@@ -538,7 +540,6 @@ public class Node implements NodeInterface {
                 if (response == null) continue;
                 if (response.startsWith("Y ")) return decodeStringRaw(response.substring(2));
                 if (response.startsWith("N"))  return null;
-                //"?" meaning that the node is not close enough, so try next
             } catch (Exception e) {}
         }
         return null;
