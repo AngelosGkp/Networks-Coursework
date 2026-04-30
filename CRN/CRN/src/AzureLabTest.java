@@ -1,5 +1,56 @@
 // IN2011 Computer Networks
 // Coursework 1 - Azure lab smoke test
+//
+// PURPOSE
+// -------
+// This program is a small example showing how your Node implementation can be
+// used on the Azure virtual lab network.
+//
+// WHAT THIS FILE IS FOR
+// ---------------------
+// - Starting a single CRN node on the Azure lab machine
+// - Letting it wait for initial contact from other nodes
+// - Performing a small number of simple read/write checks
+// - Giving you something you can use while capturing Wireshark evidence
+//
+// WHAT THIS FILE IS NOT FOR
+// -------------------------
+// This is NOT a complete test of the coursework.
+// In particular, it does not fully test:
+// - retransmission / timeout behaviour
+// - duplicate or reordered packets
+// - relay correctness
+// - malformed message robustness
+// - compare-and-swap edge cases
+// - all message types and all topologies
+//
+// WORKFLOW
+// --------
+// A sensible workflow is:
+// 1. develop and debug your Java code locally,
+// 2. test multiple local nodes yourself,
+// 3. run this file on the Azure lab machine,
+// 4. capture Wireshark evidence there.
+//
+// USAGE
+// -----
+// Compile:
+// javac *.java
+//
+// Run:
+// java AzureLabTest your.email@city.ac.uk 10.x.x.x [port]
+//
+// Examples:
+// java AzureLabTest abc123@city.ac.uk 10.12.34.56
+// java AzureLabTest abc123@city.ac.uk 10.12.34.56 20112
+//
+// NOTES
+// -----
+// - This should be run on the Azure lab machine, not your own laptop,
+// if you want to contact the provided lab nodes.
+// - Choose a port in the recommended range if possible.
+// - Your final submission must still follow the coursework rules exactly.
+
 
 class AzureLabTest {
     private static final int DEFAULT_PORT = 20110;
