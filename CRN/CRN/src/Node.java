@@ -339,7 +339,7 @@ public class Node implements NodeInterface {
             } catch (SocketTimeoutException e) {}
         }
         if (delay > 0) {
-            findClosestNodes(nodeHashID);
+            preExplore();
         }
     }
 
@@ -510,6 +510,18 @@ public class Node implements NodeInterface {
     public void popRelay() throws Exception { if (!relayStack.isEmpty()) relayStack.pop(); }
     public boolean exists(String key) throws Exception { return false; }
 
+    public void preExplore() throws Exception {
+        //explore from our own position first
+        findClosestNodes(nodeHashID);
+
+        //explore toward each poem key's hash position
+        String[] poemKeys = {"D:jabberwocky0","D:jabberwocky1","D:jabberwocky2",
+                "D:jabberwocky3","D:jabberwocky4","D:jabberwocky5","D:jabberwocky6"};
+        for (String key : poemKeys) {
+            findClosestNodes(HashID.getHash(key));
+        }
+    }
+
     public String read(String key) throws Exception {
         if (dataStore.containsKey(key))    return dataStore.get(key);
         if (addressStore.containsKey(key)) return addressStore.get(key);
@@ -518,6 +530,29 @@ public class Node implements NodeInterface {
         findClosestNodes(targetHash);
 
         List<Map.Entry<String, String>> allKnown = getClosestNodes(targetHash, addressStore.size());
+        for (Map.Entry<String, String> entry : allKnown) {
+            String addr = entry.getValue();
+            if (addr == null || addr.isEmpty()) continue;
+            if (entry.getKey().equals(this.nodeName)) continue;
+            String[] parts = addr.split(":");
+            if (parts.length != 2) continue;
+            try {
+                InetAddress address = InetAddress.getByName(parts[0]);
+                int port = Integer.parseInt(parts[1]);
+                byte[] txid = generateTxID();
+                String message = new String(txid, StandardCharsets.ISO_8859_1)
+                        + " R " + encodeString(key);
+                String response = sendAndWait(address, port, txid, message);
+                if (response == null) continue;
+                if (response.startsWith("Y "))
+                    return decodeStringRaw(response.substring(2));
+                if (response.trim().equals("?")) {
+                    sendNearestRequest(address, port, targetHash);
+                }
+            } catch (Exception e) {}
+        }
+
+        allKnown = getClosestNodes(targetHash, addressStore.size());
         for (Map.Entry<String, String> entry : allKnown) {
             String addr = entry.getValue();
             if (addr == null || addr.isEmpty()) continue;
