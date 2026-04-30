@@ -414,8 +414,14 @@ public class Node implements NodeInterface {
         if (valResult == null) return;
         String value = (String) valResult[0];
 
+        // learn all the node adresses we see
+        if (key.startsWith("N:") && value.contains(":")) {
+            learnAddress(key, value);
+        }
+
         byte[] targetHash = HashID.getHash(key);
-        boolean hasKey = dataStore.containsKey(key) || addressStore.containsKey(key);
+        boolean hasKey = dataStore.containsKey(key) ||
+                (key.startsWith("N:") && addressStore.containsKey(key));
         boolean isClosest = isOneOfClosest(targetHash);
 
         String code;
@@ -425,11 +431,10 @@ public class Node implements NodeInterface {
             else dataStore.put(key, value);
         } else if (isClosest) {
             code = "A";
-            if (key.startsWith("N:")) learnAddress(key, value);
-            else dataStore.put(key, value);
+            if (!key.startsWith("N:")) dataStore.put(key, value);
         } else {
             code = "X";
-        } //replace - add - reject
+        } //replace - add - request
 
         String response = txid + " X " + code + " ";
         byte[] responseBytes = response.getBytes(StandardCharsets.UTF_8);
@@ -487,12 +492,31 @@ public class Node implements NodeInterface {
     }
 
     public String read(String key) throws Exception {
+        // Check our own store first
         if (dataStore.containsKey(key)) return dataStore.get(key);
         if (addressStore.containsKey(key)) return addressStore.get(key);
+
         byte[] targetHash = HashID.getHash(key);
 
-        //explore the network first
-        findClosestNodes(targetHash);
+        // Do a broad exploration - query all currently known nodes
+        // for the target hash to discover more of the network
+        Set<String> queried = new HashSet<>();
+        for (int round = 0; round < 3; round++) {
+            List<Map.Entry<String, String>> known = getClosestNodes(targetHash, 10);
+            for (Map.Entry<String, String> entry : known) {
+                if (queried.contains(entry.getKey())) continue;
+                if (entry.getValue() == null || entry.getValue().isEmpty()) continue;
+                if (entry.getKey().equals(this.nodeName)) continue;
+                queried.add(entry.getKey());
+                try {
+                    String[] parts = entry.getValue().split(":");
+                    if (parts.length != 2) continue;
+                    InetAddress address = InetAddress.getByName(parts[0]);
+                    int port = Integer.parseInt(parts[1]);
+                    sendNearestRequest(address, port, targetHash);
+                } catch (Exception e) {}
+            }
+        }
 
         List<Map.Entry<String, String>> closest = getClosestNodes(targetHash, 3);
         for (Map.Entry<String, String> entry : closest) {
@@ -515,8 +539,7 @@ public class Node implements NodeInterface {
                 return decodeString(response.substring(2));
             } else if (response.startsWith("N")) {
                 return null;
-            }
-            //implementing a "not-close enough" method, ? meaning that this node isn't close enough
+            } //implementing a "not-close enough" method, ? meaning that this node isn't close enough
         }
         return null;
     }
