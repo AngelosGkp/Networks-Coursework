@@ -354,7 +354,7 @@ public class Node implements NodeInterface {
     private void findClosestNodes(byte[] targetHash) throws Exception {
         Set<String> queried = new HashSet<>();
         boolean foundNew = true;
-        int maxRounds = 10;
+        int maxRounds = 3;
 
         Map<String, String> allCandidates = new HashMap<>(seenNodes);
         allCandidates.putAll(addressStore);
@@ -404,9 +404,6 @@ public class Node implements NodeInterface {
                 socket.receive(packet);
                 processMessage(packet);
             } catch (SocketTimeoutException e) {}
-        }
-        if (delay > 0) {
-            preExplore();
         }
     }
 
