@@ -90,6 +90,8 @@ public class Node implements NodeInterface {
     private byte[] nodeHashID;
     private DatagramSocket socket;
     private final Random random = new Random();
+    private boolean hasExplored = false;
+
 
     private Map<String, String> seenNodes = new HashMap<>();
     private Map<String, String> addressStore   = new HashMap<>();
@@ -316,7 +318,7 @@ public class Node implements NodeInterface {
         byte[] msgBytes = message.getBytes(StandardCharsets.UTF_8);
 
         socket.send(new DatagramPacket(msgBytes, msgBytes.length, address, port));
-        long deadline = System.currentTimeMillis() + 2000;
+        long deadline = System.currentTimeMillis() + 500;
         while (System.currentTimeMillis() < deadline) {
             socket.setSoTimeout((int) Math.max(deadline - System.currentTimeMillis(), 1));
             try {
@@ -354,7 +356,7 @@ public class Node implements NodeInterface {
     private void findClosestNodes(byte[] targetHash) throws Exception {
         Set<String> queried = new HashSet<>();
         boolean foundNew = true;
-        int maxRounds = 3;
+        int maxRounds = 2;
 
         Map<String, String> allCandidates = new HashMap<>(seenNodes);
         allCandidates.putAll(addressStore);
@@ -394,6 +396,7 @@ public class Node implements NodeInterface {
     }
 
     public void handleIncomingMessages(int delay) throws Exception {
+        if (delay > 0) hasExplored = false;
         long deadline = (delay > 0) ? System.currentTimeMillis() + delay : Long.MAX_VALUE;
         while (System.currentTimeMillis() < deadline) {
             long remaining = deadline - System.currentTimeMillis();
@@ -724,7 +727,11 @@ public class Node implements NodeInterface {
         if (addressStore.containsKey(key)) return addressStore.get(key);
 
         byte[] targetHash = HashID.getHash(key);
-        findClosestNodes(targetHash);
+
+        if (!hasExplored) {
+            hasExplored = true;
+            findClosestNodes(nodeHashID);
+        }
 
         List<Map.Entry<String, String>> allKnown = getClosestNodes(targetHash, addressStore.size());
         for (Map.Entry<String, String> entry : allKnown) {
@@ -743,9 +750,28 @@ public class Node implements NodeInterface {
                 if (response == null) continue;
                 if (response.startsWith("Y "))
                     return decodeStringRaw(response.substring(2));
-                if (response.trim().equals("?")) {
+                if (response.trim().equals("?"))
                     sendNearestRequest(address, port, targetHash);
-                }
+            } catch (Exception e) {}
+        }
+
+        allKnown = getClosestNodes(targetHash, addressStore.size());
+        for (Map.Entry<String, String> entry : allKnown) {
+            String addr = entry.getValue();
+            if (addr == null || addr.isEmpty()) continue;
+            if (entry.getKey().equals(this.nodeName)) continue;
+            String[] parts = addr.split(":");
+            if (parts.length != 2) continue;
+            try {
+                InetAddress address = InetAddress.getByName(parts[0]);
+                int port = Integer.parseInt(parts[1]);
+                byte[] txid = generateTxID();
+                String message = new String(txid, StandardCharsets.ISO_8859_1)
+                        + " R " + encodeString(key);
+                String response = sendAndWait(address, port, txid, message);
+                if (response == null) continue;
+                if (response.startsWith("Y "))
+                    return decodeStringRaw(response.substring(2));
             } catch (Exception e) {}
         }
 
@@ -773,7 +799,6 @@ public class Node implements NodeInterface {
 
     public boolean write(String key, String value) throws Exception {
         byte[] targetHash = HashID.getHash(key);
-        findClosestNodes(targetHash);
 
         if (isOneOfClosest(targetHash)) {
             if (key.startsWith("N:")) learnAddress(key, value);
